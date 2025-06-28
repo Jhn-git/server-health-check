@@ -1,0 +1,137 @@
+name: Server Health Check
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Every 5 minutes (configurable in monitoring.json)
+  workflow_dispatch:  # Allow manual triggers
+    inputs:
+      force_notification:
+        description: 'Send notification regardless of status'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write  # Required for status badge commits
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for status badge
+        
+    - name: Load configuration
+      id: config
+      run: |
+        CONFIG=$(cat config/monitoring.json)
+        
+        # Set multi-line JSON config using heredoc syntax
+        echo "config<<EOF" >> $GITHUB_OUTPUT
+        echo "$CONFIG" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        
+        # Extract individual values for easy access
+        TIMEOUT=$(echo "$CONFIG" | jq -r '.monitoring.timeout_seconds')
+        RETRY_ATTEMPTS=$(echo "$CONFIG" | jq -r '.monitoring.retry_attempts')
+        ENDPOINT=$(echo "$CONFIG" | jq -r '.monitoring.endpoint')
+        MAX_RESPONSE_TIME=$(echo "$CONFIG" | jq -r '.health_check.max_response_time_ms')
+        EXPECTED_STATUS=$(echo "$CONFIG" | jq -r '.health_check.expected_status')
+        USER_AGENT=$(echo "$CONFIG" | jq -r '.health_check.user_agent')
+        EMBED_COLOR_DOWN=$(echo "$CONFIG" | jq -r '.notifications.embed_color_down')
+        EMBED_COLOR_UP=$(echo "$CONFIG" | jq -r '.notifications.embed_color_up')
+        MENTION_ROLE=$(echo "$CONFIG" | jq -r '.notifications.mention_role')
+        
+        echo "timeout=$TIMEOUT" >> $GITHUB_OUTPUT
+        echo "retry_attempts=$RETRY_ATTEMPTS" >> $GITHUB_OUTPUT
+        echo "endpoint=$ENDPOINT" >> $GITHUB_OUTPUT
+        echo "max_response_time=$MAX_RESPONSE_TIME" >> $GITHUB_OUTPUT
+        echo "expected_status=$EXPECTED_STATUS" >> $GITHUB_OUTPUT
+        echo "user_agent=$USER_AGENT" >> $GITHUB_OUTPUT
+        echo "embed_color_down=$EMBED_COLOR_DOWN" >> $GITHUB_OUTPUT
+        echo "embed_color_up=$EMBED_COLOR_UP" >> $GITHUB_OUTPUT
+        echo "mention_role=$MENTION_ROLE" >> $GITHUB_OUTPUT
+        
+    - name: Perform health check
+      id: health_check
+      uses: ./.github/actions/health-checker
+      with:
+        server-host: ${{ secrets.SERVER_HOST }}
+        server-port: ${{ secrets.SERVER_PORT }}
+        endpoint: ${{ steps.config.outputs.endpoint }}
+        timeout: ${{ steps.config.outputs.timeout }}
+        retry-attempts: ${{ steps.config.outputs.retry_attempts }}
+        max-response-time: ${{ steps.config.outputs.max_response_time }}
+        expected-status: ${{ steps.config.outputs.expected_status }}
+        user-agent: ${{ steps.config.outputs.user_agent }}
+        
+    - name: Get last run status
+      id: last_status
+      run: |
+        # Get the conclusion of the previous run
+        LAST_STATUS=$(gh run list --workflow="health-check.yml" --limit=2 --json status,conclusion | jq -r '.[1].conclusion // "unknown"')
+        echo "last_status=$LAST_STATUS" >> $GITHUB_OUTPUT
+        echo "Previous run status: $LAST_STATUS"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      continue-on-error: true
+        
+    - name: Send failure notification
+      if: steps.health_check.outputs.status == 'failure' || github.event.inputs.force_notification == 'true'
+      uses: ./.github/actions/discord-notify
+      with:
+        webhook-url: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        notification-type: 'failure'
+        server-host: ${{ secrets.SERVER_HOST }}
+        server-port: ${{ secrets.SERVER_PORT }}
+        response-time: ${{ steps.health_check.outputs.response-time }}
+        http-code: ${{ steps.health_check.outputs.http-code }}
+        error-message: ${{ steps.health_check.outputs.error }}
+        attempts-made: ${{ steps.health_check.outputs.attempts-made }}
+        max-attempts: ${{ steps.config.outputs.retry_attempts }}
+        embed-color-down: ${{ steps.config.outputs.embed_color_down }}
+        mention-role: ${{ steps.config.outputs.mention_role }}
+        role-id: ${{ vars.DISCORD_ROLE_ID }}
+        
+    - name: Send recovery notification
+      if: steps.health_check.outputs.status == 'success' && (steps.last_status.outputs.last_status == 'failure' || github.event.inputs.force_notification == 'true')
+      uses: ./.github/actions/discord-notify
+      with:
+        webhook-url: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        notification-type: 'recovery'
+        server-host: ${{ secrets.SERVER_HOST }}
+        server-port: ${{ secrets.SERVER_PORT }}
+        response-time: ${{ steps.health_check.outputs.response-time }}
+        http-code: ${{ steps.health_check.outputs.http-code }}
+        embed-color-up: ${{ steps.config.outputs.embed_color_up }}
+        
+    - name: Update status badge
+      id: status_badge
+      uses: ./.github/actions/status-badge
+      with:
+        status: ${{ steps.health_check.outputs.status }}
+        response-time: ${{ steps.health_check.outputs.response-time }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Summary
+      run: |
+        echo "## 🏥 Health Check Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Server:** http://${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PORT }}${{ steps.config.outputs.endpoint }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Status:** ${{ steps.health_check.outputs.status == 'success' && '✅ Online' || '❌ Offline' }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Response Time:** ${{ steps.health_check.outputs.response-time }}ms" >> $GITHUB_STEP_SUMMARY
+        echo "**HTTP Code:** ${{ steps.health_check.outputs.http-code }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Attempts:** ${{ steps.health_check.outputs.attempts-made }}/${{ steps.config.outputs.retry_attempts }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ steps.health_check.outputs.status }}" = "failure" ]; then
+          echo "**Error:** ${{ steps.health_check.outputs.error }}" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ steps.status_badge.outputs.badge-updated }}" = "true" ]; then
+          echo "📊 **Status Badge:** Updated" >> $GITHUB_STEP_SUMMARY
+          echo "**Badge URL:** ${{ steps.status_badge.outputs.status-url }}" >> $GITHUB_STEP_SUMMARY
+        fi

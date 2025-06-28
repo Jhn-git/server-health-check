@@ -1,0 +1,189 @@
+name: 'Discord Status Notification'
+description: 'Sends Discord notifications for server status changes'
+inputs:
+  webhook-url:
+    description: 'Discord webhook URL'
+    required: true
+  notification-type:
+    description: 'Type of notification (failure, recovery)'
+    required: true
+  server-host:
+    description: 'Server hostname or IP address'
+    required: true
+  server-port:
+    description: 'Server port number'
+    required: true
+  response-time:
+    description: 'Response time in milliseconds'
+    required: false
+    default: '0'
+  http-code:
+    description: 'HTTP status code'
+    required: false
+    default: '000'
+  error-message:
+    description: 'Error message for failures'
+    required: false
+    default: 'Unknown error'
+  attempts-made:
+    description: 'Number of attempts made'
+    required: false
+    default: '1'
+  max-attempts:
+    description: 'Maximum number of attempts allowed'
+    required: false
+    default: '3'
+  embed-color-down:
+    description: 'Embed color for server down notifications'
+    required: false
+    default: '#FF0000'
+  embed-color-up:
+    description: 'Embed color for server recovery notifications'
+    required: false
+    default: '#00FF00'
+  mention-role:
+    description: 'Whether to mention a Discord role'
+    required: false
+    default: 'false'
+  role-id:
+    description: 'Discord role ID to mention'
+    required: false
+    default: ''
+
+outputs:
+  notification-sent:
+    description: 'Whether notification was sent successfully'
+    value: ${{ steps.send-notification.outputs.sent }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Send Discord notification
+      id: send-notification
+      shell: bash
+      run: |
+        NOTIFICATION_TYPE="${{ inputs.notification-type }}"
+        WEBHOOK_URL="${{ inputs.webhook-url }}"
+        SERVER_URL="http://${{ inputs.server-host }}:${{ inputs.server-port }}"
+        RESPONSE_TIME="${{ inputs.response-time }}"
+        HTTP_CODE="${{ inputs.http-code }}"
+        ERROR_MESSAGE="${{ inputs.error-message }}"
+        ATTEMPTS_MADE="${{ inputs.attempts-made }}"
+        MAX_ATTEMPTS="${{ inputs.max-attempts }}"
+        MENTION_ROLE="${{ inputs.mention-role }}"
+        ROLE_ID="${{ inputs.role-id }}"
+        
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+        
+        # Build mention string
+        MENTION_TEXT=""
+        if [ "$MENTION_ROLE" = "true" ] && [ -n "$ROLE_ID" ]; then
+          MENTION_TEXT="<@&$ROLE_ID> "
+        fi
+        
+        if [ "$NOTIFICATION_TYPE" = "failure" ]; then
+          EMBED_COLOR="${{ inputs.embed-color-down }}"
+          CONTENT="${MENTION_TEXT}🔴 **Server Health Alert**"
+          TITLE="Server Down"
+          DESCRIPTION="Health check failed for your server"
+          
+          EMBED=$(cat << EOF
+        {
+          "content": "$CONTENT",
+          "embeds": [
+            {
+              "title": "$TITLE",
+              "description": "$DESCRIPTION",
+              "color": $((0x${EMBED_COLOR#\#})),
+              "fields": [
+                {
+                  "name": "🌐 Server",
+                  "value": "$SERVER_URL",
+                  "inline": true
+                },
+                {
+                  "name": "⏱️ Response Time",
+                  "value": "${RESPONSE_TIME}ms",
+                  "inline": true
+                },
+                {
+                  "name": "🔄 Attempts",
+                  "value": "${ATTEMPTS_MADE}/${MAX_ATTEMPTS}",
+                  "inline": true
+                },
+                {
+                  "name": "❌ Error",
+                  "value": "${ERROR_MESSAGE}",
+                  "inline": false
+                }
+              ],
+              "timestamp": "$TIMESTAMP",
+              "footer": {
+                "text": "Server Health Monitor"
+              }
+            }
+          ]
+        }
+        EOF
+          )
+          
+        elif [ "$NOTIFICATION_TYPE" = "recovery" ]; then
+          EMBED_COLOR="${{ inputs.embed-color-up }}"
+          CONTENT="✅ **Server Recovery**"
+          TITLE="Server Online"
+          DESCRIPTION="Your server is back online and responding normally"
+          
+          EMBED=$(cat << EOF
+        {
+          "content": "$CONTENT",
+          "embeds": [
+            {
+              "title": "$TITLE",
+              "description": "$DESCRIPTION",
+              "color": $((0x${EMBED_COLOR#\#})),
+              "fields": [
+                {
+                  "name": "🌐 Server",
+                  "value": "$SERVER_URL",
+                  "inline": true
+                },
+                {
+                  "name": "⏱️ Response Time",
+                  "value": "${RESPONSE_TIME}ms",
+                  "inline": true
+                },
+                {
+                  "name": "✅ Status",
+                  "value": "HTTP ${HTTP_CODE}",
+                  "inline": true
+                }
+              ],
+              "timestamp": "$TIMESTAMP",
+              "footer": {
+                "text": "Server Health Monitor"
+              }
+            }
+          ]
+        }
+        EOF
+          )
+          
+        else
+          echo "❌ Unknown notification type: $NOTIFICATION_TYPE"
+          echo "sent=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+        echo "📨 Sending $NOTIFICATION_TYPE notification to Discord..."
+        
+        if curl -X POST "$WEBHOOK_URL" \
+           -H "Content-Type: application/json" \
+           -d "$EMBED" \
+           --silent --show-error; then
+          echo "✅ Notification sent successfully"
+          echo "sent=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Failed to send notification"
+          echo "sent=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi

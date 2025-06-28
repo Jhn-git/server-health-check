@@ -1,0 +1,128 @@
+name: 'Server Health Check'
+description: 'Performs health check with retry logic and timeout handling'
+inputs:
+  server-host:
+    description: 'Server hostname or IP address'
+    required: true
+  server-port:
+    description: 'Server port number'
+    required: true
+  endpoint:
+    description: 'Health check endpoint path'
+    required: false
+    default: '/api/health'
+  timeout:
+    description: 'Request timeout in seconds'
+    required: false
+    default: '30'
+  retry-attempts:
+    description: 'Number of retry attempts'
+    required: false
+    default: '3'
+  max-response-time:
+    description: 'Maximum acceptable response time in milliseconds'
+    required: false
+    default: '5000'
+  expected-status:
+    description: 'Expected HTTP status code'
+    required: false
+    default: '200'
+  user-agent:
+    description: 'User agent string for requests'
+    required: false
+    default: 'Server-Health-Monitor/1.0'
+
+outputs:
+  status:
+    description: 'Health check status (success/failure)'
+    value: ${{ steps.health-check.outputs.status }}
+  response-time:
+    description: 'Response time in milliseconds'
+    value: ${{ steps.health-check.outputs.response_time }}
+  http-code:
+    description: 'HTTP status code returned'
+    value: ${{ steps.health-check.outputs.http_code }}
+  error:
+    description: 'Error message if check failed'
+    value: ${{ steps.health-check.outputs.error }}
+  attempts-made:
+    description: 'Number of attempts made'
+    value: ${{ steps.health-check.outputs.attempts_made }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Perform health check with retry
+      id: health-check
+      shell: bash
+      run: |
+        SERVER_URL="http://${{ inputs.server-host }}:${{ inputs.server-port }}${{ inputs.endpoint }}"
+        TIMEOUT=${{ inputs.timeout }}
+        MAX_ATTEMPTS=${{ inputs.retry-attempts }}
+        MAX_RESPONSE_TIME=${{ inputs.max-response-time }}
+        EXPECTED_STATUS=${{ inputs.expected-status }}
+        USER_AGENT="${{ inputs.user-agent }}"
+        
+        echo "🔍 Server Health Check"
+        echo "Server: $SERVER_URL"
+        echo "Timeout: ${TIMEOUT}s, Max Response Time: ${MAX_RESPONSE_TIME}ms"
+        echo "Max Attempts: $MAX_ATTEMPTS, Expected Status: $EXPECTED_STATUS"
+        
+        SUCCESS=false
+        ATTEMPT=1
+        LAST_ERROR=""
+        RESPONSE_TIME=0
+        HTTP_CODE=0
+        
+        while [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$SUCCESS" = false ]; do
+          echo "📡 Attempt $ATTEMPT/$MAX_ATTEMPTS"
+          
+          START_TIME=$(date +%s%3N)
+          
+          if RESPONSE=$(curl -s -w "%{http_code}" --max-time $TIMEOUT --user-agent "$USER_AGENT" "$SERVER_URL" 2>&1); then
+            END_TIME=$(date +%s%3N)
+            RESPONSE_TIME=$((END_TIME - START_TIME))
+            HTTP_CODE="${RESPONSE: -3}"
+            RESPONSE_BODY="${RESPONSE%???}"
+            
+            echo "   Status: $HTTP_CODE, Response Time: ${RESPONSE_TIME}ms"
+            
+            if [ "$HTTP_CODE" = "$EXPECTED_STATUS" ]; then
+              if [ $RESPONSE_TIME -le $MAX_RESPONSE_TIME ]; then
+                SUCCESS=true
+                echo "   ✅ Health check successful"
+                break
+              else
+                LAST_ERROR="Response time ${RESPONSE_TIME}ms exceeds maximum ${MAX_RESPONSE_TIME}ms"
+                echo "   ⚠️ $LAST_ERROR"
+              fi
+            else
+              LAST_ERROR="HTTP $HTTP_CODE (expected $EXPECTED_STATUS)"
+              echo "   ❌ $LAST_ERROR"
+            fi
+          else
+            END_TIME=$(date +%s%3N)
+            RESPONSE_TIME=$((END_TIME - START_TIME))
+            LAST_ERROR="Connection failed: $RESPONSE"
+            echo "   ❌ $LAST_ERROR"
+          fi
+          
+          if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+            echo "   ⏳ Waiting 10 seconds before retry..."
+            sleep 10
+          fi
+          
+          ATTEMPT=$((ATTEMPT + 1))
+        done
+        
+        # Set outputs
+        if [ "$SUCCESS" = true ]; then
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "status=failure" >> $GITHUB_OUTPUT
+          echo "error=$LAST_ERROR" >> $GITHUB_OUTPUT
+        fi
+        
+        echo "response_time=$RESPONSE_TIME" >> $GITHUB_OUTPUT
+        echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
+        echo "attempts_made=$((ATTEMPT - 1))" >> $GITHUB_OUTPUT

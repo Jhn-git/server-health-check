@@ -1,0 +1,124 @@
+name: 'Update Status Badge'
+description: 'Updates persistent status badge data for shields.io integration'
+inputs:
+  status:
+    description: 'Current server status (success/failure)'
+    required: true
+  response-time:
+    description: 'Response time in milliseconds'
+    required: false
+    default: '0'
+  uptime-percentage:
+    description: 'Uptime percentage'
+    required: false
+    default: '0'
+  github-token:
+    description: 'GitHub token for committing status updates'
+    required: true
+
+outputs:
+  badge-updated:
+    description: 'Whether badge was updated successfully'
+    value: ${{ steps.update-badge.outputs.updated }}
+  status-url:
+    description: 'URL for the status badge'
+    value: ${{ steps.update-badge.outputs.status_url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Update status badge data
+      id: update-badge
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        STATUS="${{ inputs.status }}"
+        RESPONSE_TIME="${{ inputs.response-time }}"
+        UPTIME_PERCENTAGE="${{ inputs.uptime-percentage }}"
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+        
+        # Create status directory if it doesn't exist
+        mkdir -p status
+        
+        # Create status JSON for shields.io
+        if [ "$STATUS" = "success" ]; then
+          STATUS_COLOR="brightgreen"
+          STATUS_MESSAGE="online"
+          BADGE_STATUS="up"
+        else
+          STATUS_COLOR="red"
+          STATUS_MESSAGE="down"
+          BADGE_STATUS="down"
+        fi
+        
+        # Create shields.io compatible JSON
+        cat > status/server-status.json << EOF
+        {
+          "schemaVersion": 1,
+          "label": "server",
+          "message": "$STATUS_MESSAGE",
+          "color": "$STATUS_COLOR",
+          "namedLogo": "server",
+          "logoColor": "white"
+        }
+        EOF
+        
+        # Create detailed status for internal use
+        cat > status/detailed-status.json << EOF
+        {
+          "status": "$BADGE_STATUS",
+          "message": "$STATUS_MESSAGE",
+          "response_time_ms": $RESPONSE_TIME,
+          "uptime_percentage": $UPTIME_PERCENTAGE,
+          "last_check": "$TIMESTAMP",
+          "color": "$STATUS_COLOR"
+        }
+        EOF
+        
+        # Create simple status file for easy parsing
+        echo "$BADGE_STATUS" > status/status.txt
+        echo "$STATUS_MESSAGE" > status/message.txt
+        echo "$RESPONSE_TIME" > status/response-time.txt
+        
+        # Check if there are changes to commit
+        if git diff --quiet status/ 2>/dev/null; then
+          echo "📊 No status changes detected"
+          echo "updated=false" >> $GITHUB_OUTPUT
+        else
+          echo "📊 Status changes detected, committing..."
+          
+          # Configure git
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Add and commit status files
+          git add status/
+          git commit -m "Update server status: $STATUS_MESSAGE (${RESPONSE_TIME}ms)
+          
+          🤖 Automated status update
+          - Status: $BADGE_STATUS
+          - Response Time: ${RESPONSE_TIME}ms
+          - Timestamp: $TIMESTAMP" || true
+          
+          # Push to current branch
+          git push origin HEAD 2>/dev/null || {
+            echo "⚠️ Could not push status update (this is normal for forks)"
+          }
+          
+          echo "updated=true" >> $GITHUB_OUTPUT
+        fi
+        
+        # Generate status badge URLs
+        REPO_NAME="${GITHUB_REPOSITORY}"
+        BRANCH_NAME="${GITHUB_REF_NAME:-main}"
+        
+        # Direct JSON endpoint URL for shields.io
+        STATUS_URL="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/${REPO_NAME}/${BRANCH_NAME}/status/server-status.json"
+        
+        echo "status_url=$STATUS_URL" >> $GITHUB_OUTPUT
+        
+        echo "🎯 Status badge URLs:"
+        echo "  Shields.io: $STATUS_URL"
+        echo "  Raw JSON: https://raw.githubusercontent.com/${REPO_NAME}/${BRANCH_NAME}/status/server-status.json"
+        echo "  Detailed: https://raw.githubusercontent.com/${REPO_NAME}/${BRANCH_NAME}/status/detailed-status.json"

@@ -1,0 +1,22 @@
+{
+  "monitoring": {
+    "check_interval": "*/5 * * * *",
+    "timeout_seconds": 30,
+    "retry_attempts": 3,
+    "failure_threshold": 2,
+    "endpoint": "/api/health"
+  },
+  "notifications": {
+    "mention_role": false,
+    "embed_color_down": "#FF0000",
+    "embed_color_up": "#00FF00",
+    "embed_color_warning": "#FFA500",
+    "include_response_time": true,
+    "include_error_details": true
+  },
+  "health_check": {
+    "expected_status": 200,
+    "max_response_time_ms": 5000,
+    "user_agent": "Server-Health-Monitor/1.0"
+  }
+}
